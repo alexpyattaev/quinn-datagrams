@@ -4,6 +4,10 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use std::any::Any;
+use std::time::Instant;
+
+use quinn::congestion::{Controller, ControllerFactory};
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::rustls::client::danger::{
     HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
@@ -25,6 +29,7 @@ pub struct TransportOptions {
     pub datagram_receive_buffer: usize,
     pub datagram_send_buffer: usize,
     pub idle_timeout: Option<Duration>,
+    pub no_congestion_control: bool,
 }
 
 impl Default for TransportOptions {
@@ -33,7 +38,50 @@ impl Default for TransportOptions {
             datagram_receive_buffer: DEFAULT_DATAGRAM_BUFFER_BYTES,
             datagram_send_buffer: DEFAULT_DATAGRAM_BUFFER_BYTES,
             idle_timeout: Some(Duration::from_secs(DEFAULT_IDLE_TIMEOUT_SECS)),
+            no_congestion_control: false,
         }
+    }
+}
+
+// No-op congestion controller: window is always u64::MAX, all events ignored.
+#[derive(Clone)]
+struct NoCongestionControl;
+
+impl Controller for NoCongestionControl {
+    fn on_congestion_event(
+        &mut self,
+        _now: Instant,
+        _sent: Instant,
+        _is_persistent_congestion: bool,
+        _is_ecn: bool,
+        _lost_bytes: u64,
+    ) {
+    }
+
+    fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+    fn window(&self) -> u64 {
+        8000000
+    }
+
+    fn clone_box(&self) -> Box<dyn Controller> {
+        Box::new(self.clone())
+    }
+
+    fn initial_window(&self) -> u64 {
+        80000000
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+struct NoCongestionControlFactory;
+
+impl ControllerFactory for NoCongestionControlFactory {
+    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+        Box::new(NoCongestionControl)
     }
 }
 
@@ -55,6 +103,10 @@ pub fn transport_config(options: TransportOptions) -> Result<Arc<TransportConfig
             )
         })?;
     transport.max_idle_timeout(idle_timeout);
+
+    if options.no_congestion_control {
+        transport.congestion_controller_factory(Arc::new(NoCongestionControlFactory));
+    }
 
     Ok(Arc::new(transport))
 }

@@ -67,6 +67,7 @@ async fn run_server(args: Args) -> Result<(), BoxError> {
         datagram_receive_buffer: args.datagram_receive_buffer,
         datagram_send_buffer: args.datagram_send_buffer,
         idle_timeout: Some(Duration::from_secs(args.idle_timeout_secs)),
+        no_congestion_control: false,
     })?;
     let config = server_config(transport)?;
     let socket = server_socket(args.bind, args.socket_recv_buffer)?;

@@ -39,6 +39,8 @@ struct Args {
     duration_secs: Option<u64>,
     #[arg(long, default_value_t = 0)]
     pps: u64,
+    #[arg(long, default_value_t = false)]
+    no_cc: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -74,6 +76,7 @@ async fn main() -> Result<(), BoxError> {
         datagram_receive_buffer: args.datagram_receive_buffer,
         datagram_send_buffer: args.datagram_send_buffer,
         idle_timeout: Some(Duration::from_secs(args.idle_timeout_secs)),
+        no_congestion_control: args.no_cc,
     })?;
     let client_config = insecure_client_config(transport)?;
     let endpoint = Endpoint::client(args.bind)?;
