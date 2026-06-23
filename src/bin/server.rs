@@ -34,6 +34,10 @@ struct Args {
     idle_timeout_secs: u64,
     #[arg(long, default_value_t = 1)]
     accept_tasks: usize,
+    /// Maximum number of concurrent in-flight handshakes. If unset, no limit is
+    /// applied; if set, must be greater than zero.
+    #[arg(long)]
+    max_concurrent_handshakes: Option<usize>,
     #[arg(long, default_value_t = DEFAULT_ENDPOINT_RUNTIME_THREADS)]
     endpoint_runtime_threads: usize,
     #[arg(long, default_value_t = DEFAULT_CONNECTION_RUNTIME_THREADS)]
@@ -90,6 +94,12 @@ async fn run_server(args: Args, runtimes: EndpointRuntimeConfig) -> Result<(), B
     if args.socket_recv_buffer == 0 {
         return Err("socket_recv_buffer must be greater than zero".into());
     }
+    if args.max_concurrent_handshakes == Some(0) {
+        return Err("max_concurrent_handshakes must be greater than zero when set".into());
+    }
+    let handshake_semaphore = args
+        .max_concurrent_handshakes
+        .map(|permits| Arc::new(tokio::sync::Semaphore::new(permits)));
 
     let transport = transport_config(TransportOptions {
         datagram_receive_buffer: args.datagram_receive_buffer,
@@ -109,9 +119,11 @@ async fn run_server(args: Args, runtimes: EndpointRuntimeConfig) -> Result<(), B
     let metrics = Arc::new(Metrics::default());
 
     println!(
-        "listening={} accept_tasks={} endpoint_runtime_threads={} connection_runtime_threads={} socket_recv_buffer_requested={} socket_recv_buffer_effective={}",
+        "listening={} accept_tasks={} max_concurrent_handshakes={} endpoint_runtime_threads={} connection_runtime_threads={} socket_recv_buffer_requested={} socket_recv_buffer_effective={}",
         endpoint.local_addr()?,
         args.accept_tasks,
+        args.max_concurrent_handshakes
+            .map_or_else(|| "unlimited".to_string(), |n| n.to_string()),
         args.endpoint_runtime_threads,
         args.connection_runtime_threads,
         args.socket_recv_buffer,
@@ -121,7 +133,11 @@ async fn run_server(args: Args, runtimes: EndpointRuntimeConfig) -> Result<(), B
 
     let mut accept_handles = Vec::with_capacity(args.accept_tasks);
     for _ in 0..args.accept_tasks {
-        accept_handles.push(tokio::spawn(accept_loop(endpoint.clone(), metrics.clone())));
+        accept_handles.push(tokio::spawn(accept_loop(
+            endpoint.clone(),
+            metrics.clone(),
+            handshake_semaphore.clone(),
+        )));
     }
 
     tokio::signal::ctrl_c().await?;
@@ -141,17 +157,27 @@ fn server_socket(bind: SocketAddrV4, recv_buffer_size: usize) -> std::io::Result
     Ok(socket)
 }
 
-async fn accept_loop(endpoint: Endpoint, metrics: Arc<Metrics>) {
-    let sem = Arc::new(tokio::sync::Semaphore::new(2));
+async fn accept_loop(
+    endpoint: Endpoint,
+    metrics: Arc<Metrics>,
+    semaphore: Option<Arc<tokio::sync::Semaphore>>,
+) {
     while let Some(incoming) = endpoint.accept().await {
-        match Arc::clone(&sem).try_acquire_owned() {
-            Ok(permit) => {
-                tokio::spawn(handle_incoming(incoming, metrics.clone(), permit));
+        match &semaphore {
+            // No limit configured: spawn unconditionally.
+            None => {
+                tokio::spawn(handle_incoming(incoming, metrics.clone(), None));
             }
-            Err(_) => {
-                incoming.ignore();
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
+            // Limit configured: only spawn if a permit is available.
+            Some(semaphore) => match Arc::clone(semaphore).try_acquire_owned() {
+                Ok(permit) => {
+                    tokio::spawn(handle_incoming(incoming, metrics.clone(), Some(permit)));
+                }
+                Err(_) => {
+                    incoming.ignore();
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            },
         }
     }
 }
@@ -159,7 +185,7 @@ async fn accept_loop(endpoint: Endpoint, metrics: Arc<Metrics>) {
 async fn handle_incoming(
     incoming: Incoming,
     metrics: Arc<Metrics>,
-    permit: tokio::sync::OwnedSemaphorePermit,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) {
     match incoming.await {
         Ok(connection) => {
