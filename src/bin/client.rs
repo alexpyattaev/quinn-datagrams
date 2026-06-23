@@ -37,6 +37,8 @@ struct Args {
     idle_timeout_secs: u64,
     #[arg(long)]
     duration_secs: Option<u64>,
+    #[arg(long, default_value_t = 0)]
+    pps: u64,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -99,6 +101,7 @@ async fn main() -> Result<(), BoxError> {
         send_mode: args.send_mode,
         metrics: metrics.clone(),
         shutdown: shutdown.clone(),
+        pps: args.pps,
     };
 
     tokio::spawn(report_metrics(metrics.clone()));
@@ -126,6 +129,7 @@ struct ConnectContext {
     send_mode: SendMode,
     metrics: Arc<Metrics>,
     shutdown: Arc<AtomicBool>,
+    pps: u64,
 }
 
 async fn open_connections(context: ConnectContext) {
@@ -157,6 +161,7 @@ async fn open_connections(context: ConnectContext) {
                         context.metrics.clone(),
                         context.shutdown.clone(),
                         context.limiter.clone(),
+                        context.pps,
                     ));
                 }
                 Err(_error) => {
@@ -218,6 +223,7 @@ async fn run_connection(
     metrics: Arc<Metrics>,
     shutdown: Arc<AtomicBool>,
     limiter: Arc<ConnectionLimiter>,
+    pps: u64,
 ) {
     if matches!(send_mode, SendMode::Idle) {
         keep_connection_open(&connection, shutdown).await;
@@ -237,10 +243,10 @@ async fn run_connection(
 
     match send_mode {
         SendMode::Wait => {
-            send_with_backpressure(&connection, payload, metrics.clone(), shutdown).await
+            send_with_backpressure(&connection, payload, metrics.clone(), shutdown, pps).await
         }
         SendMode::Drop => {
-            send_without_backpressure(&connection, payload, metrics.clone(), shutdown).await
+            send_without_backpressure(&connection, payload, metrics.clone(), shutdown, pps).await
         }
         SendMode::Idle => unreachable!("idle mode returned before sending"),
     }
@@ -282,8 +288,17 @@ async fn send_with_backpressure(
     payload: Bytes,
     metrics: Arc<Metrics>,
     shutdown: Arc<AtomicBool>,
+    pps: u64,
 ) {
+    let mut interval = (pps > 0).then(|| {
+        let mut i = tokio::time::interval(Duration::from_nanos(1_000_000_000 / pps));
+        i.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        i
+    });
     while !shutdown.load(Ordering::Relaxed) {
+        if let Some(ref mut interval) = interval {
+            interval.tick().await;
+        }
         let payload_len = payload.len();
         match connection.send_datagram_wait(payload.clone()).await {
             Ok(()) => {
@@ -308,9 +323,18 @@ async fn send_without_backpressure(
     payload: Bytes,
     metrics: Arc<Metrics>,
     shutdown: Arc<AtomicBool>,
+    pps: u64,
 ) {
+    let mut interval = (pps > 0).then(|| {
+        let mut i = tokio::time::interval(Duration::from_nanos(1_000_000_000 / pps));
+        i.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        i
+    });
     let mut since_yield = 0usize;
     while !shutdown.load(Ordering::Relaxed) {
+        if let Some(ref mut interval) = interval {
+            interval.tick().await;
+        }
         let payload_len = payload.len();
         match connection.send_datagram(payload.clone()) {
             Ok(()) => {
@@ -328,10 +352,12 @@ async fn send_without_backpressure(
             }
         }
 
-        since_yield += 1;
-        if since_yield == 1024 {
-            since_yield = 0;
-            tokio::task::yield_now().await;
+        if interval.is_none() {
+            since_yield += 1;
+            if since_yield == 1024 {
+                since_yield = 0;
+                tokio::task::yield_now().await;
+            }
         }
     }
 }
