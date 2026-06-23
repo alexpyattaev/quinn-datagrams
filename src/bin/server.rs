@@ -7,13 +7,18 @@ use datagram_bench::{
     BoxError, DEFAULT_DATAGRAM_BUFFER_BYTES, DEFAULT_IDLE_TIMEOUT_SECS, TransportOptions,
     format_bitrate, parse_byte_size, server_config, transport_config,
 };
-use quinn::{Connection, Endpoint, EndpointConfig, Incoming, TokioRuntime};
+use quinn::{
+    Connection, Endpoint, EndpointConfig, EndpointRuntimeConfig, Incoming, TokioRuntimeHandle,
+};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::runtime::Builder;
 use tokio::time::{Duration, Instant, MissedTickBehavior};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+const DEFAULT_ENDPOINT_RUNTIME_THREADS: usize = 2;
+const DEFAULT_CONNECTION_RUNTIME_THREADS: usize = 4;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -29,8 +34,10 @@ struct Args {
     idle_timeout_secs: u64,
     #[arg(long, default_value_t = 1)]
     accept_tasks: usize,
-    #[arg(long, default_value_t = 8)]
-    tokio_worker_threads: usize,
+    #[arg(long, default_value_t = DEFAULT_ENDPOINT_RUNTIME_THREADS)]
+    endpoint_runtime_threads: usize,
+    #[arg(long, default_value_t = DEFAULT_CONNECTION_RUNTIME_THREADS)]
+    connection_runtime_threads: usize,
 }
 
 #[derive(Default)]
@@ -44,18 +51,39 @@ struct Metrics {
 
 fn main() -> Result<(), BoxError> {
     let args = Args::parse();
-    if args.tokio_worker_threads == 0 {
-        return Err("tokio_worker_threads must be greater than zero".into());
+    if args.endpoint_runtime_threads == 0 {
+        return Err("endpoint_runtime_threads must be greater than zero".into());
+    }
+    if args.connection_runtime_threads == 0 {
+        return Err("connection_runtime_threads must be greater than zero".into());
     }
 
-    Builder::new_multi_thread()
-        .worker_threads(args.tokio_worker_threads)
-        .enable_all()
-        .build()?
-        .block_on(run_server(args))
+    let endpoint_runtime = runtime(args.endpoint_runtime_threads, "dgram-endpt")?;
+    let connection_runtime = runtime(args.connection_runtime_threads, "dgram-conn")?;
+    let runtimes = EndpointRuntimeConfig::new(
+        Arc::new(TokioRuntimeHandle::new(endpoint_runtime.handle().clone())),
+        Arc::new(TokioRuntimeHandle::new(connection_runtime.handle().clone())),
+    );
+
+    connection_runtime.block_on(run_server(args, runtimes))
 }
 
-async fn run_server(args: Args) -> Result<(), BoxError> {
+fn runtime(
+    worker_threads: usize,
+    thread_name_prefix: &'static str,
+) -> std::io::Result<tokio::runtime::Runtime> {
+    let next_thread = AtomicUsize::new(0);
+    Builder::new_multi_thread()
+        .worker_threads(worker_threads)
+        .thread_name_fn(move || {
+            let thread_index = next_thread.fetch_add(1, Ordering::Relaxed);
+            format!("{thread_name_prefix}-{thread_index}")
+        })
+        .enable_all()
+        .build()
+}
+
+async fn run_server(args: Args, runtimes: EndpointRuntimeConfig) -> Result<(), BoxError> {
     if args.accept_tasks == 0 {
         return Err("accept_tasks must be greater than zero".into());
     }
@@ -72,19 +100,20 @@ async fn run_server(args: Args) -> Result<(), BoxError> {
     let config = server_config(transport)?;
     let socket = server_socket(args.bind, args.socket_recv_buffer)?;
     let effective_recv_buffer = socket.recv_buffer_size()?;
-    let endpoint = Endpoint::new(
+    let endpoint = Endpoint::new_with_runtimes(
         EndpointConfig::default(),
         Some(config),
         socket.into(),
-        Arc::new(TokioRuntime),
+        runtimes,
     )?;
     let metrics = Arc::new(Metrics::default());
 
     println!(
-        "listening={} accept_tasks={} tokio_worker_threads={} socket_recv_buffer_requested={} socket_recv_buffer_effective={}",
+        "listening={} accept_tasks={} endpoint_runtime_threads={} connection_runtime_threads={} socket_recv_buffer_requested={} socket_recv_buffer_effective={}",
         endpoint.local_addr()?,
         args.accept_tasks,
-        args.tokio_worker_threads,
+        args.endpoint_runtime_threads,
+        args.connection_runtime_threads,
         args.socket_recv_buffer,
         effective_recv_buffer
     );
