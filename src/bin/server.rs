@@ -112,22 +112,25 @@ fn server_socket(bind: SocketAddrV4, recv_buffer_size: usize) -> std::io::Result
 }
 
 async fn accept_loop(endpoint: Endpoint, metrics: Arc<Metrics>) {
-    let sem = Arc::new(tokio::sync::Semaphore::new(2000));
+    let sem = Arc::new(tokio::sync::Semaphore::new(2));
     while let Some(incoming) = endpoint.accept().await {
-         match Arc::clone(&sem).try_acquire_owned() {
-              Ok(permit) => {
-                  tokio::spawn(handle_incoming(incoming, metrics.clone(), permit));
-              }
-              Err(_) => {
+        match Arc::clone(&sem).try_acquire_owned() {
+            Ok(permit) => {
+                tokio::spawn(handle_incoming(incoming, metrics.clone(), permit));
+            }
+            Err(_) => {
                 incoming.ignore();
                 tokio::time::sleep(Duration::from_millis(1)).await;
-              }
-          }
-
+            }
+        }
     }
 }
 
-async fn handle_incoming(incoming: Incoming, metrics: Arc<Metrics>,  permit: tokio::sync::OwnedSemaphorePermit) {
+async fn handle_incoming(
+    incoming: Incoming,
+    metrics: Arc<Metrics>,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
     match incoming.await {
         Ok(connection) => {
             metrics.open_connections.fetch_add(1, Ordering::Relaxed);
