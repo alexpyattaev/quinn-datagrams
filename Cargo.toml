@@ -16,4 +16,6 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "tim
 quinn = { git = "https://github.com/alessandrod/quinn.git", rev = "b8a0db8389be9238fbf53bc04a4e7ae8d6c6192a" }
 quinn-proto = { git = "https://github.com/alessandrod/quinn.git", rev = "b8a0db8389be9238fbf53bc04a4e7ae8d6c6192a" }
 [profile.release]
-debug = 2
+debug = true
+strip = false
+split-debuginfo = "off"
