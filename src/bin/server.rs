@@ -2,10 +2,11 @@ use std::net::{SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
+use bytes::Bytes;
 use clap::Parser;
 use datagram_bench::{
-    BoxError, DEFAULT_DATAGRAM_BUFFER_BYTES, DEFAULT_IDLE_TIMEOUT_SECS, TransportOptions,
-    format_bitrate, parse_byte_size, server_config, transport_config,
+    BoxError, CongestionControl, DEFAULT_DATAGRAM_BUFFER_BYTES, DEFAULT_IDLE_TIMEOUT_SECS,
+    TransportOptions, format_bitrate, parse_byte_size, server_config, transport_config,
 };
 use quinn::{
     Connection, Endpoint, EndpointConfig, EndpointRuntimeConfig, Incoming, TokioRuntimeHandle,
@@ -19,6 +20,7 @@ static GLOBAL_ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemall
 
 const DEFAULT_ENDPOINT_RUNTIME_THREADS: usize = 2;
 const DEFAULT_CONNECTION_RUNTIME_THREADS: usize = 4;
+const DATAGRAM_READ_BATCH_SIZE: usize = 64;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -32,6 +34,8 @@ struct Args {
     datagram_send_buffer: usize,
     #[arg(long, default_value_t = DEFAULT_IDLE_TIMEOUT_SECS)]
     idle_timeout_secs: u64,
+    #[arg(long)]
+    disable_congestion_control: bool,
     #[arg(long, default_value_t = 1)]
     accept_tasks: usize,
     /// Maximum number of concurrent in-flight handshakes. If unset, no limit is
@@ -101,11 +105,16 @@ async fn run_server(args: Args, runtimes: EndpointRuntimeConfig) -> Result<(), B
         .max_concurrent_handshakes
         .map(|permits| Arc::new(tokio::sync::Semaphore::new(permits)));
 
+    let congestion_control = if args.disable_congestion_control {
+        CongestionControl::Disabled
+    } else {
+        CongestionControl::Enabled
+    };
     let transport = transport_config(TransportOptions {
         datagram_receive_buffer: args.datagram_receive_buffer,
         datagram_send_buffer: args.datagram_send_buffer,
         idle_timeout: Some(Duration::from_secs(args.idle_timeout_secs)),
-        no_congestion_control: false,
+        congestion_control,
     })?;
     let config = server_config(transport)?;
     let socket = server_socket(args.bind, args.socket_recv_buffer)?;
@@ -119,7 +128,7 @@ async fn run_server(args: Args, runtimes: EndpointRuntimeConfig) -> Result<(), B
     let metrics = Arc::new(Metrics::default());
 
     println!(
-        "listening={} accept_tasks={} max_concurrent_handshakes={} endpoint_runtime_threads={} connection_runtime_threads={} socket_recv_buffer_requested={} socket_recv_buffer_effective={}",
+        "listening={} accept_tasks={} max_concurrent_handshakes={} endpoint_runtime_threads={} connection_runtime_threads={} socket_recv_buffer_requested={} socket_recv_buffer_effective={} congestion_control={:?}",
         endpoint.local_addr()?,
         args.accept_tasks,
         args.max_concurrent_handshakes
@@ -127,7 +136,8 @@ async fn run_server(args: Args, runtimes: EndpointRuntimeConfig) -> Result<(), B
         args.endpoint_runtime_threads,
         args.connection_runtime_threads,
         args.socket_recv_buffer,
-        effective_recv_buffer
+        effective_recv_buffer,
+        congestion_control
     );
     tokio::spawn(report_metrics(metrics.clone()));
 
@@ -202,13 +212,19 @@ async fn handle_incoming(
 }
 
 async fn read_datagrams(connection: Connection, metrics: Arc<Metrics>) {
+    let mut datagrams: [Bytes; DATAGRAM_READ_BATCH_SIZE] = std::array::from_fn(|_| Bytes::new());
     loop {
-        match connection.read_datagram().await {
-            Ok(datagram) => {
-                metrics.datagrams.fetch_add(1, Ordering::Relaxed);
+        match connection.read_datagrams(&mut datagrams).await {
+            Ok(count) => {
+                let mut datagram_bytes = 0;
+                for datagram in &mut datagrams[..count] {
+                    datagram_bytes += datagram.len() as u64;
+                    *datagram = Bytes::new();
+                }
+                metrics.datagrams.fetch_add(count as u64, Ordering::Relaxed);
                 metrics
                     .datagram_bytes
-                    .fetch_add(datagram.len() as u64, Ordering::Relaxed);
+                    .fetch_add(datagram_bytes, Ordering::Relaxed);
             }
             Err(_error) => {
                 return;

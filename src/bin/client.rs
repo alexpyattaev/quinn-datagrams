@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use datagram_bench::{
-    BoxError, DEFAULT_CONNECT_CONCURRENCY, DEFAULT_DATAGRAM_BUFFER_BYTES,
+    BoxError, CongestionControl, DEFAULT_CONNECT_CONCURRENCY, DEFAULT_DATAGRAM_BUFFER_BYTES,
     DEFAULT_IDLE_TIMEOUT_SECS, DEFAULT_PAYLOAD_BYTES, SERVER_NAME, TransportOptions,
     format_bitrate, insecure_client_config, parse_byte_size, transport_config,
 };
@@ -36,11 +36,11 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_IDLE_TIMEOUT_SECS)]
     idle_timeout_secs: u64,
     #[arg(long)]
+    disable_congestion_control: bool,
+    #[arg(long)]
     duration_secs: Option<u64>,
     #[arg(long, default_value_t = 0)]
     pps: u64,
-    #[arg(long, default_value_t = false)]
-    no_cc: bool,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -72,24 +72,30 @@ async fn main() -> Result<(), BoxError> {
         return Err("payload_bytes must be greater than zero".into());
     }
 
+    let congestion_control = if args.disable_congestion_control {
+        CongestionControl::Disabled
+    } else {
+        CongestionControl::Enabled
+    };
     let transport = transport_config(TransportOptions {
         datagram_receive_buffer: args.datagram_receive_buffer,
         datagram_send_buffer: args.datagram_send_buffer,
         idle_timeout: Some(Duration::from_secs(args.idle_timeout_secs)),
-        no_congestion_control: args.no_cc,
+        congestion_control,
     })?;
     let client_config = insecure_client_config(transport)?;
     let endpoint = Endpoint::client(args.bind)?;
     endpoint.set_default_client_config(client_config);
 
     println!(
-        "local={} server={} target_connections={} connect_concurrency={} payload_bytes={} send_mode={:?}",
+        "local={} server={} target_connections={} connect_concurrency={} payload_bytes={} send_mode={:?} congestion_control={:?}",
         endpoint.local_addr()?,
         args.server,
         target_label(args.connections),
         args.connect_concurrency,
         args.payload_bytes,
-        args.send_mode
+        args.send_mode,
+        congestion_control
     );
 
     let metrics = Arc::new(Metrics::default());
