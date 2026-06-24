@@ -13,8 +13,8 @@ tikv-jemallocator = "0.7"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 
 [patch.crates-io]
-quinn = { git = "https://github.com/alessandrod/quinn.git", rev = "b8a0db8389be9238fbf53bc04a4e7ae8d6c6192a" }
-quinn-proto = { git = "https://github.com/alessandrod/quinn.git", rev = "b8a0db8389be9238fbf53bc04a4e7ae8d6c6192a" }
+quinn = { git = "https://github.com/alessandrod/quinn.git", rev = "b620ebbbdfdc2577c67e3b8b4c55b7b8c2abab96" }
+quinn-proto = { git = "https://github.com/alessandrod/quinn.git", rev = "b620ebbbdfdc2577c67e3b8b4c55b7b8c2abab96" }
 [profile.release]
 debug = true
 strip = false

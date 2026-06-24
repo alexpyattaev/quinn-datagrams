@@ -615,7 +615,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.12.0"
-source = "git+https://github.com/alessandrod/quinn.git?rev=b8a0db8389be9238fbf53bc04a4e7ae8d6c6192a#b8a0db8389be9238fbf53bc04a4e7ae8d6c6192a"
+source = "git+https://github.com/alessandrod/quinn.git?rev=b620ebbbdfdc2577c67e3b8b4c55b7b8c2abab96#b620ebbbdfdc2577c67e3b8b4c55b7b8c2abab96"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -634,7 +634,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.12.0"
-source = "git+https://github.com/alessandrod/quinn.git?rev=b8a0db8389be9238fbf53bc04a4e7ae8d6c6192a#b8a0db8389be9238fbf53bc04a4e7ae8d6c6192a"
+source = "git+https://github.com/alessandrod/quinn.git?rev=b620ebbbdfdc2577c67e3b8b4c55b7b8c2abab96#b620ebbbdfdc2577c67e3b8b4c55b7b8c2abab96"
 dependencies = [
  "bytes",
  "fastbloom",
@@ -657,7 +657,7 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.6.1"
-source = "git+https://github.com/alessandrod/quinn.git?rev=b8a0db8389be9238fbf53bc04a4e7ae8d6c6192a#b8a0db8389be9238fbf53bc04a4e7ae8d6c6192a"
+source = "git+https://github.com/alessandrod/quinn.git?rev=b620ebbbdfdc2577c67e3b8b4c55b7b8c2abab96#b620ebbbdfdc2577c67e3b8b4c55b7b8c2abab96"
 dependencies = [
  "cfg_aliases",
  "libc",
